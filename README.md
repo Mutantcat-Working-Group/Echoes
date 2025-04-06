@@ -1,5 +1,5 @@
 <div align=center>
-<img src="https://s2.loli.net/2024/04/05/xFopiS8CgBswb9y.jpg" style="width:100px;"/>
+<img src="https://s2.loli.net/2024/04/05/xFopiS8CgBswb9y.jpg" style="width:100px;" width="100"/>
 <h2>回声</h2>
 </div>
 
