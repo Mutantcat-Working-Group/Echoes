@@ -30,9 +30,16 @@ func main() {
 	token := flag.String("token", "", "群钉钉机器人token")
 	//-ding_secret                群钉钉机器人secret
 	secret0 := flag.String("secret0", "", "群钉钉机器人secret")
+	//-smtp_user                  mail通知的发件账号（仅mail模式需要）
+	smtp_user := flag.String("smtp_user", "", "mail通知的发件账号")
+	//-smtp_from                  mail通知的发件来源邮箱（仅mail模式需要）
+	smtp_from := flag.String("smtp_from", "", "mail通知的发件来源邮箱")
+	//-smtp_to                    mail通知的收件邮箱（仅mail模式需要）
+	smtp_to := flag.String("smtp_to", "", "mail通知的收件邮箱")
+	//-help                       是否帮助模式（0/1）
+	help := flag.Int("help", 0, "帮助信息模式(0/1)")
 	flag.Parse() //解析命令行参数
 
-	help := flag.Int("help", 0, "帮助信息模式(0/1)")
 	if help != nil && *help == 1 {
 		flag.PrintDefaults() //输出帮助信息
 		return
@@ -58,14 +65,14 @@ func main() {
 
 	// 如果开启了通知模式没开启pin模式 使用通知模式阻塞进程
 	if *pin_enable == 0 && (notice_mod != nil && *notice_mod != "") {
-		lifecycle.RegisterWarning(*server_name, *interval_time, *loadavg_max_percent, *mem_used_percent, *cpu_used_percent, *notice_mod, *token, *secret0)
-		lifecycle.RegisterNotice(*server_name, *daily_time, *notice_mod, *token, *secret0)
+		lifecycle.RegisterWarning(*server_name, *interval_time, *loadavg_max_percent, *mem_used_percent, *cpu_used_percent, *notice_mod, *token, *secret0, *smtp_user, *smtp_from, *smtp_to)
+		lifecycle.RegisterNotice(*server_name, *daily_time, *notice_mod, *token, *secret0, *smtp_user, *smtp_from, *smtp_to)
 	}
 
 	// 如果同时开启了通知模式和pin模式 使用通知模式阻塞进程
 	if *pin_enable == 1 && (notice_mod != nil && *notice_mod != "") {
 		go lifecycle.StartGin(gin, *port)
-		lifecycle.RegisterWarning(*server_name, *interval_time, *loadavg_max_percent, *mem_used_percent, *cpu_used_percent, *notice_mod, *token, *secret0)
-		lifecycle.RegisterNotice(*server_name, *daily_time, *notice_mod, *token, *secret0)
+		lifecycle.RegisterWarning(*server_name, *interval_time, *loadavg_max_percent, *mem_used_percent, *cpu_used_percent, *notice_mod, *token, *secret0, *smtp_user, *smtp_from, *smtp_to)
+		lifecycle.RegisterNotice(*server_name, *daily_time, *notice_mod, *token, *secret0, *smtp_user, *smtp_from, *smtp_to)
 	}
 }

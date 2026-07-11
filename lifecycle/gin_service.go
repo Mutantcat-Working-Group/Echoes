@@ -35,6 +35,9 @@ func RegisterRouter(ginServer *gin.Engine, router ...router.RouterTemplate) erro
 			return err
 		}
 		err = r.InitRouter(ginServer)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

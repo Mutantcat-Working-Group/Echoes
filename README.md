@@ -46,8 +46,11 @@
     -pin_enable                 探针模式是否开启（1/0）
     -port                       主动服务的端口
     -notice_mod                 通知方式（dingbot/mail/jiang）
-    -token                      通知方式的token
-    -secret0                    通知方式的secret
+    -token                      通知dingbot的群钉钉机器人token / mail的smtp地址(host:port) / jiang的SendKey
+    -secret0                    通知dingbot的群钉钉机器人secret / mail的发件密码（或授权码）
+    -smtp_user                  mail通知的发件账号（仅mail模式需要）
+    -smtp_from                  mail通知的发件来源邮箱（仅mail模式需要）
+    -smtp_to                    mail通知的收件邮箱（仅mail模式需要）
     ```
 - 参数默认值
     ```
@@ -64,16 +67,30 @@
     -notice_mod                 
     -token                
     -secret0                
+    -smtp_user
+    -smtp_from
+    -smtp_to
     ```
 - 注意
     ```
     若启动时未开启探针模式也未指定通知模式，则程序会直接退出
     若启用帮助模式，则作用仅限为查看帮助，程序会直接退出
+    dingbot 模式：token=access_token、secret0=secret
+    mail 模式：token=host:port（如 smtp.qq.com:465）、secret0=发件密码/授权码、smtp_user/smtp_from/smtp_to 必填
+    jiang 模式：token=Server 酱 SendKey（https://sct.ftqq.com/ 获取）
+    mail 会根据端口自动选择 SSL（465）/ 明文（25/587）发送
     ```
 
 - 演示参数
     ```
+    dingbot 模式
     ./echoes -server_name echoes_server -daily_time 09:30 -interval_time 30 -loadavg_max_percent 70 -mem_used_percent 90 -cpu_used_percent 90 -pin_enable 1 -port 9966 -notice_mod dingbot -token xxxx -secret0 xxxx
+
+    mail 模式（QQ 邮箱 SSL 示例）
+    ./echoes -server_name echoes_server -daily_time 09:30 -interval_time 30 -loadavg_max_percent 70 -mem_used_percent 90 -cpu_used_percent 90 -pin_enable 1 -port 9966 -notice_mod mail -token smtp.qq.com:465 -secret0 授权码 -smtp_user 123456@qq.com -smtp_from 123456@qq.com -smtp_to admin@example.com
+
+    Server 酱模式
+    ./echoes -server_name echoes_server -daily_time 09:30 -interval_time 30 -loadavg_max_percent 70 -mem_used_percent 90 -cpu_used_percent 90 -pin_enable 1 -port 9966 -notice_mod jiang -token SCTxxxxxx
     ```
 
 - 通知形式
@@ -146,8 +163,8 @@
 - [X] 作为探针主动获得服务器状态
 - [X] 钉钉机器人群通知
 - [ ] 缓存信息以支持高并发请求
-- [ ] 邮箱通知
-- [ ] Server酱通知
+- [X] 邮箱通知
+- [X] Server酱通知
 
 ### 七、历史版本
 - https://github.com/tyza66/ServerWatcher-DingBot
