@@ -3,6 +3,7 @@ package main
 import (
 	"com.mutantcat.echoes/lifecycle"
 	"com.mutantcat.echoes/router"
+	"com.mutantcat.echoes/status"
 	"flag"
 	"time"
 )
@@ -36,6 +37,8 @@ func main() {
 	smtp_from := flag.String("smtp_from", "", "mail通知的发件来源邮箱")
 	//-smtp_to                    mail通知的收件邮箱（仅mail模式需要）
 	smtp_to := flag.String("smtp_to", "", "mail通知的收件邮箱")
+	//-cache_ttl                  /info 接口缓存有效期（秒），高并发场景下避免重复采样
+	cache_ttl := flag.Int("cache_ttl", 0, "/info 接口缓存有效期（秒），0 表示与 interval_time 一致")
 	//-help                       是否帮助模式（0/1）
 	help := flag.Int("help", 0, "帮助信息模式(0/1)")
 	flag.Parse() //解析命令行参数
@@ -56,7 +59,19 @@ func main() {
 	}
 
 	gin := lifecycle.InitGin()
-	lifecycle.RegisterRouter(gin, &router.InfoRouter{})
+	// 构造系统信息缓存：cache_ttl <= 0 时回退为 interval_time，保证
+	// "同一份状态数据既供告警判断、也供 /info 接口使用"。
+	ttl := time.Duration(*cache_ttl) * time.Second
+	if ttl <= 0 {
+		ttl = time.Duration(*interval_time) * time.Second
+	}
+	infoCache := status.NewInfoCache(ttl)
+	// 仅在探针模式下启用后台预热；纯告警场景没必要常驻刷新 goroutine。
+	if *pin_enable == 1 {
+		stop := infoCache.StartBackgroundRefresh()
+		defer stop()
+	}
+	lifecycle.RegisterRouter(gin, &router.InfoRouter{Cache: infoCache})
 
 	// 如果开启了pin模式但是没开启通知模式 使用pin模式阻塞进程
 	if *pin_enable == 1 && (notice_mod == nil || *notice_mod == "") {
