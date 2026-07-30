@@ -1,39 +1,43 @@
 package status
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/disk"
 )
 
-// cacheTTL 控制 /info 接口返回的状态快照有效期。
-// 在 TTL 窗口内的并发请求会复用同一份快照，避免 CPU 采样、磁盘 IO 等重型调用被打爆。
-// 默认值由 NewCache 调用方传入；这里仅作为兜底，避免 0 值导致"永远不过期"或"每次都重新采集"。
+// defaultCacheTTL 是 NewInfoCache 在调用方传入 <=0 时的兜底有效期。
 const defaultCacheTTL = 30 * time.Second
 
 // InfoCache 是系统状态快照的并发安全缓存。
 //
 // 设计要点：
-//   - 读路径完全不调用 gopsutil，全部命中内存快照，单次响应在微秒级。
-//   - 使用 atomic.Pointer 持有快照，refresh 与并发读之间无需加锁即可保证可见性。
-//   - 默认惰性刷新：访问时若过期则同步刷新；可配合 StartBackgroundRefresh 周期预热。
-//   - 当 refresh 正在进行时，多个并发请求通过 refreshing 单飞标志合并为一次实际采集。
+//   - 读路径命中内存快照，不调用 gopsutil；单次响应在微秒级。
+//   - 快照通过 atomic.Pointer 持有，写新快照与并发读之间无需加锁即可保证可见性。
+//   - 惰性刷新：Get 时发现过期则触发一次采集；可配合 StartBackgroundRefresh 周期预热。
+//   - 同一时刻至多一次实际采集：通过 refreshing 单飞 + doneCh 唤醒等待者，
+//     避免高并发下出现"惊群"重复采集或大量 goroutine 空转。
+//   - 构造时不采集，避免启动阶段被 cpu.Percent / disk.Usage 阻塞
+//     （后者在 NFS 等挂载点上可能 hang）。
 type InfoCache struct {
-	ttl        time.Duration
-	snap       atomic.Pointer[snapshot]
-	refreshing atomic.Bool // 防重入：避免并发请求各自触发一次采集
+	ttl  time.Duration
+	snap atomic.Pointer[snapshot]
+
+	mu         sync.Mutex
+	refreshing bool
+	doneCh     chan struct{} // 非 nil 表示有正在进行的采集，采集完成后被关闭
 }
 
-// snapshot 是某次采集产出的不可变快照。
-// 一旦写入原子指针后就不再被修改，保证读路径零锁。
+// snapshot 是不可变快照，写入 atomic指针后只读。
 type snapshot struct {
 	sysInfo LSysInfo
 	disk    *DiskSnapshot
 	built   time.Time
 }
 
-// DiskSnapshot 是 *disk.UsageStat 的轻量副本，避免对外暴露 gopsutil 类型。
+// DiskSnapshot 是 *disk.UsageStat 的本地副本，避免 gopsutil 类型泄漏到 API 层。
 type DiskSnapshot struct {
 	Path              string  `json:"path"`
 	Fstype            string  `json:"fstype"`
@@ -47,15 +51,13 @@ type DiskSnapshot struct {
 	InodesUsedPercent float64 `json:"inodesUsedPercent"`
 }
 
-// NewInfoCache 构造一个缓存实例，ttl 为 0 时使用 defaultCacheTTL。
+// NewInfoCache 构造缓存实例。ttl <= 0 时使用 defaultCacheTTL。
+// 注意：构造函数不采集，首份快照由首次 Get 或后台预热产生，避免启动阻塞。
 func NewInfoCache(ttl time.Duration) *InfoCache {
 	if ttl <= 0 {
 		ttl = defaultCacheTTL
 	}
-	c := &InfoCache{ttl: ttl}
-	// 预热一次首屏快照，避免第一次 /info 请求延迟。
-	c.doRefresh()
-	return c
+	return &InfoCache{ttl: ttl}
 }
 
 // TTL 返回当前缓存有效期。
@@ -63,52 +65,63 @@ func (c *InfoCache) TTL() time.Duration {
 	return c.ttl
 }
 
-// Get 返回当前快照；若已过期则触发一次惰性刷新。
+// Get 返回当前快照。若缓存为空或已过期，则触发一次惰性刷新。
 // 返回值第三位表示本次是否实际触发了一次采集。
 func (c *InfoCache) Get() (LSysInfo, *DiskSnapshot, bool) {
 	snap := c.snap.Load()
 	if snap != nil && time.Since(snap.built) < c.ttl {
 		return snap.sysInfo, snap.disk, false
 	}
-	c.doRefresh()
+	refresh := c.doRefresh()
 	snap = c.snap.Load()
 	if snap == nil {
-		// refresh 失败且无旧快照：兜底采集一次，确保接口不返回 nil。
-		fallback := collectOnce()
-		c.snap.Store(fallback)
-		return fallback.sysInfo, fallback.disk, true
+		// 极端情况下 doRefresh 未能产出快照（例如被快速 stop）：兜底采集一次。
+		snap = collectOnce()
+		c.snap.Store(snap)
+		return snap.sysInfo, snap.disk, true
 	}
-	return snap.sysInfo, snap.disk, true
+	return snap.sysInfo, snap.disk, refresh
 }
 
-// doRefresh 重新采集一次并原子替换快照。
-// 使用 refreshing 标志做单飞控制：同一时刻只会有一次实际的采集调用。
-func (c *InfoCache) doRefresh() {
-	if !c.refreshing.CompareAndSwap(false, true) {
-		// 已有其他 goroutine 正在刷新，等待其完成即可，避免重复采集。
-		deadline := time.Now().Add(c.ttl)
-		for {
-			s := c.snap.Load()
-			if s != nil && time.Since(s.built) < c.ttl {
-				return
-			}
-			if time.Now().After(deadline) {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
+// doRefresh 保证同一次"过期窗口"内至多执行一次实际采集。
+//
+// - 若当前无采集在进行：本 goroutine 成为采集者，完成后唤醒所有等待者。
+// - 当前已有采集在进行：阻塞等待其完成（而非空转），避免 goroutine 堆积。
+func (c *InfoCache) doRefresh() bool {
+	c.mu.Lock()
+	if c.refreshing {
+		ch := c.doneCh
+		c.mu.Unlock()
+		// 等待采集者完成；采集者关闭 ch 后所有等待者被唤醒。
+		<-ch
+		return false
 	}
-	defer c.refreshing.Store(false)
-	c.snap.Store(collectOnce())
+	c.refreshing = true
+	c.doneCh = make(chan struct{})
+	c.mu.Unlock()
+
+	// 实际采集在锁外进行，避免阻塞其他 goroutine 的"加入等待"动作。
+	snap := collectOnce()
+
+	c.mu.Lock()
+	c.refreshing = false
+	close(c.doneCh)
+	c.doneCh = nil
+	c.mu.Unlock()
+
+	c.snap.Store(snap)
+	return true
 }
 
-// StartBackgroundRefresh 启动一个后台 goroutine 周期刷新缓存；
-// 返回的 stop 函数用于停止该 goroutine，便于测试和优雅退出。
+// StartBackgroundRefresh 启动后台 goroutine，先立即采集一次，然后按 ttl 周期刷新。
+// 返回的 stop 函数用于停止后台 goroutine（通过 channel 通知，阻塞至 goroutine 退出）。
 func (c *InfoCache) StartBackgroundRefresh() (stop func()) {
 	stopCh := make(chan struct{})
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
+		// 立即预热一次，避免首次请求承担采集延迟。
+		c.doRefresh()
 		ticker := time.NewTicker(c.ttl)
 		defer ticker.Stop()
 		for {
@@ -126,7 +139,7 @@ func (c *InfoCache) StartBackgroundRefresh() (stop func()) {
 	}
 }
 
-// collectOnce 执行一次实际的状态采集并打包为 snapshot。
+// collectOnce 执行一次实际采集并打包为 snapshot。
 func collectOnce() *snapshot {
 	return &snapshot{
 		sysInfo: GetSysInfo(),
@@ -135,8 +148,7 @@ func collectOnce() *snapshot {
 	}
 }
 
-// toDiskSnapshot 将 gopsutil 返回的 *disk.UsageStat 转换为本地结构体，
-// 避免外部依赖泄漏到缓存层 / API 层。
+// toDiskSnapshot 将 gopsutil 返回的 *disk.UsageStat 转换为本地结构体。
 func toDiskSnapshot(d *disk.UsageStat) *DiskSnapshot {
 	if d == nil {
 		return nil

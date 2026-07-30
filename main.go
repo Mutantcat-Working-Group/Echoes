@@ -59,15 +59,16 @@ func main() {
 	}
 
 	gin := lifecycle.InitGin()
-	// 构造系统信息缓存：cache_ttl <= 0 时回退为 interval_time，保证
-	// "同一份状态数据既供告警判断、也供 /info 接口使用"。
-	ttl := time.Duration(*cache_ttl) * time.Second
-	if ttl <= 0 {
-		ttl = time.Duration(*interval_time) * time.Second
-	}
-	infoCache := status.NewInfoCache(ttl)
-	// 仅在探针模式下启用后台预热；纯告警场景没必要常驻刷新 goroutine。
+
+	// 仅探针模式需要响应 /info 接口，因此缓存也只在探针开启时构造。
+	// cache_ttl <= 0 时回退为 interval_time，避免重复采样。
+	var infoCache *status.InfoCache
 	if *pin_enable == 1 {
+		ttl := time.Duration(*cache_ttl) * time.Second
+		if ttl <= 0 {
+			ttl = time.Duration(*interval_time) * time.Second
+		}
+		infoCache = status.NewInfoCache(ttl)
 		stop := infoCache.StartBackgroundRefresh()
 		defer stop()
 	}
