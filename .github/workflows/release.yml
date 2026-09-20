@@ -1,0 +1,283 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+  build:
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            arch: amd64
+            runner: windows-2022
+          - os: darwin
+            arch: arm64
+            runner: macos-15
+          - os: darwin
+            arch: amd64
+            runner: macos-15
+          - os: linux
+            arch: amd64
+            runner: ubuntu-22.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-22.04
+    env:
+      APP_NAME: Echoes
+      BINARY_NAME: echoes
+      GOOS: ${{ matrix.os }}
+      GOARCH: ${{ matrix.arch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "dist/${BINARY_NAME}${EXT}" .
+
+      - name: Build tar package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          STAGE="staging/${APP_NAME}-${VERSION}-${GOOS}-${GOARCH}"
+          mkdir -p "${STAGE}"
+          cp "dist/${BINARY_NAME}${EXT}" "${STAGE}/"
+          for DOC in LICENSE LICENSE.txt README.md; do
+            if [ -f "${DOC}" ]; then cp "${DOC}" "${STAGE}/"; fi
+          done
+          tar -czf "dist/${APP_NAME}-${VERSION}-${GOOS}-${GOARCH}.tar.gz" -C staging "${APP_NAME}-${VERSION}-${GOOS}-${GOARCH}"
+
+      - name: Build Windows NSIS installer
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          choco install nsis -y --no-progress
+          cat > installer.nsi <<'EOF'
+          !include "MUI2.nsh"
+          Name "${APP_NAME}"
+          OutFile "dist\${APP_NAME}-${VERSION}-windows-${ARCH}-setup.exe"
+          InstallDir "$PROGRAMFILES64\${APP_NAME}"
+          InstallDirRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "InstallLocation"
+          RequestExecutionLevel admin
+          !define MUI_ABORTWARNING
+          !insertmacro MUI_PAGE_WELCOME
+          !insertmacro MUI_PAGE_DIRECTORY
+          !insertmacro MUI_PAGE_INSTFILES
+          !insertmacro MUI_UNPAGE_CONFIRM
+          !insertmacro MUI_UNPAGE_INSTFILES
+          !insertmacro MUI_LANGUAGE "SimpChinese"
+          
+          Section "Install"
+            SetOutPath "$INSTDIR"
+            File "dist\${BINARY_NAME}.exe"
+            CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+            CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${BINARY_NAME}.exe"
+            CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${BINARY_NAME}.exe"
+            WriteUninstaller "$INSTDIR\Uninstall.exe"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayName" "${APP_NAME}"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayVersion" "${VERSION}"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "Publisher" "Mutantcat Working Group"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "InstallLocation" "$INSTDIR"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "UninstallString" "$INSTDIR\Uninstall.exe"
+          SectionEnd
+          
+          Section "Uninstall"
+            Delete "$DESKTOP\${APP_NAME}.lnk"
+            RMDir /r "$SMPROGRAMS\${APP_NAME}"
+            Delete "$INSTDIR\Uninstall.exe"
+            Delete "$INSTDIR\${BINARY_NAME}.exe"
+            RMDir "$INSTDIR"
+            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+          SectionEnd
+          EOF
+          makensis -V2 -DVERSION="$VERSION" -DAPP_NAME="$APP_NAME" -DBINARY_NAME="$BINARY_NAME" -DARCH="$GOARCH" installer.nsi
+
+      - name: Build macOS app and DMG
+        if: matrix.os == 'darwin'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          APP="dist/${APP_NAME}.app"
+          mkdir -p "${APP}/Contents/MacOS"
+          cp "dist/${BINARY_NAME}" "${APP}/Contents/MacOS/${BINARY_NAME}"
+          chmod +x "${APP}/Contents/MacOS/${BINARY_NAME}"
+          cat > "${APP}/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>${APP_NAME}</string>
+            <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
+            <key>CFBundleExecutable</key><string>${BINARY_NAME}</string>
+            <key>CFBundleIdentifier</key><string>org.mutantcat.${BINARY_NAME}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>10.13</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          codesign --force --deep --sign - "${APP}"
+          hdiutil create -volname "${APP_NAME} ${VERSION}" -srcfolder "${APP}" -ov -format UDZO "dist/${APP_NAME}-${VERSION}-darwin-${GOARCH}.dmg"
+          codesign --force --sign - "dist/${APP_NAME}-${VERSION}-darwin-${GOARCH}.dmg"
+
+      - name: Build Linux AppImage
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          APPDIR="dist/${APP_NAME}.AppDir"
+          mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/share/applications" "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
+          cp "dist/${BINARY_NAME}" "${APPDIR}/usr/bin/${BINARY_NAME}"
+          chmod +x "${APPDIR}/usr/bin/${BINARY_NAME}"
+          cat > "${APPDIR}/${APP_NAME}.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=${APP_NAME}
+          Exec=${BINARY_NAME}
+          Icon=${APP_NAME}
+          Terminal=true
+          Categories=Utility;
+          EOF
+          cp "${APPDIR}/${APP_NAME}.desktop" "${APPDIR}/usr/share/applications/${APP_NAME}.desktop"
+          cat > "${APPDIR}/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "${HERE}/usr/bin/echoes" "$@"
+          EOF
+          chmod +x "${APPDIR}/AppRun"
+          cat > "${APPDIR}/${APP_NAME}.svg" <<'EOF'
+          <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+            <rect width="256" height="256" rx="32" fill="#2f6f4f"/>
+            <text x="128" y="160" font-size="96" text-anchor="middle" fill="#ffffff" font-family="sans-serif">EC</text>
+          </svg>
+          EOF
+          cp "${APPDIR}/${APP_NAME}.svg" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/${APP_NAME}.svg"
+          if [ "$GOARCH" = "arm64" ]; then
+            sudo apt-get update
+            sudo apt-get install -y qemu-user-static binfmt-support
+            curl -fsSL -o appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage
+          else
+            curl -fsSL -o appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          fi
+          chmod +x appimagetool.AppImage
+          ./appimagetool.AppImage --appimage-extract-and-run "${APPDIR}" "dist/${APP_NAME}-${VERSION}-linux-${GOARCH}.AppImage"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*setup.exe
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.tar.gz
+          if-no-files-found: warn
+
+  docker:
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      IMAGE: ghcr.io/mutantcat-working-group/echoes
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum -- * > ../checksums.txt
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-assets/* checksums.txt --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${TAG}" release-assets/* checksums.txt --repo "${GITHUB_REPOSITORY}" --title "${TAG}" --generate-notes
+          fi

@@ -5,8 +5,12 @@ import (
 	"com.mutantcat.echoes/router"
 	"com.mutantcat.echoes/status"
 	"flag"
+	"fmt"
 	"time"
 )
+
+// version 为当前发布版本号，release 构建可用 -ldflags -X main.version 覆盖。
+var version = "1.0.20260920"
 
 func main() {
 	//-server_name                服务器名称
@@ -44,6 +48,7 @@ func main() {
 	flag.Parse() //解析命令行参数
 
 	if help != nil && *help == 1 {
+		fmt.Printf("Echoes %s\n", version)
 		flag.PrintDefaults() //输出帮助信息
 		return
 	}

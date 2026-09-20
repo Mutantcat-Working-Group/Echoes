@@ -1,0 +1,9 @@
+.git
+.github
+build
+dist
+staging
+node_modules
+*.log
+Dockerfile
+.dockerignore
