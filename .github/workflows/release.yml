@@ -270,6 +270,8 @@ jobs:
         run: |
           cd release-assets
           sha256sum -- * > ../checksums.txt
+          md5sum -- * > ../checksums-md5.txt
+          sha1sum -- * > ../checksums-sha1.txt
 
       - name: Create or update release
         env:
@@ -277,7 +279,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${TAG}" release-assets/* checksums.txt --repo "${GITHUB_REPOSITORY}" --clobber
+            gh release upload "${TAG}" release-assets/* checksums.txt checksums-md5.txt checksums-sha1.txt --repo "${GITHUB_REPOSITORY}" --clobber
           else
-            gh release create "${TAG}" release-assets/* checksums.txt --repo "${GITHUB_REPOSITORY}" --title "${TAG}" --generate-notes
+            gh release create "${TAG}" release-assets/* checksums.txt checksums-md5.txt checksums-sha1.txt --repo "${GITHUB_REPOSITORY}" --title "${TAG}" --generate-notes
           fi
