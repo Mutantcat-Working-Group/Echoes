@@ -1,3 +1,5 @@
+// Echoes — 由异猫工作群（mutantcat.org）发行
+// GitHub: https://github.com/Mutantcat-Working-Group
 package main
 
 import (
@@ -49,6 +51,7 @@ func main() {
 
 	if help != nil && *help == 1 {
 		fmt.Printf("Echoes %s\n", version)
+		fmt.Println("由异猫工作群（mutantcat.org）发行 · https://github.com/Mutantcat-Working-Group")
 		flag.PrintDefaults() //输出帮助信息
 		return
 	}
