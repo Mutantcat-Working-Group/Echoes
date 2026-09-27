@@ -89,6 +89,39 @@ jobs:
           done
           tar -czf "dist/${APP_NAME}-${VERSION}-${GOOS}-${GOARCH}.tar.gz" -C staging "${APP_NAME}-${VERSION}-${GOOS}-${GOARCH}"
 
+      - name: Sign Windows application binary
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'mutantcat-code-signing.pfx'
+          $password = 'mutantcat'
+          $cert = New-SelfSignedCertificate `
+            -Subject 'CN=Mutantcat Working Group, O=Mutantcat Working Group, C=CN' `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -KeyUsage DigitalSignature `
+            -Type CodeSigningCert `
+            -KeyExportPolicy Exportable `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
+            -NotAfter (Get-Date).AddYears(10)
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString -String $password -Force -AsPlainText) | Out-Null
+          "PFX_PATH=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SIGN_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $signtool = $null
+          foreach ($kit in (Get-ChildItem -Path 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory | Sort-Object Name -Descending)) {
+            $candidate = Join-Path $kit.FullName 'x64\signtool.exe'
+            if (Test-Path $candidate) { $signtool = $candidate; break }
+          }
+          if (-not $signtool) { throw 'signtool.exe not found in the Windows SDK' }
+          "SIGNTOOL_PATH=$signtool" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $target = "dist/$env:BINARY_NAME.exe"
+          if (-not (Test-Path $target)) { throw "missing $target" }
+          & $signtool sign /fd SHA256 /f $pfx /p $password /d "$env:APP_NAME" "$target"
+          echo "signed $target"
+
       - name: Build Windows NSIS installer
         if: matrix.os == 'windows'
         shell: bash
@@ -102,6 +135,7 @@ jobs:
           InstallDir "$PROGRAMFILES64\${APP_NAME}"
           InstallDirRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "InstallLocation"
           RequestExecutionLevel admin
+          BrandingText "回声 v${VERSION}"
           !define MUI_ABORTWARNING
           !insertmacro MUI_PAGE_WELCOME
           !insertmacro MUI_PAGE_DIRECTORY
@@ -135,6 +169,17 @@ jobs:
           EOF
           makensis -V2 -DVERSION="$VERSION" -DAPP_NAME="$APP_NAME" -DBINARY_NAME="$BINARY_NAME" -DARCH="$GOARCH" installer.nsi
 
+      - name: Sign Windows installer
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:PFX_PATH -or -not $env:SIGNTOOL_PATH) { throw 'code-signing setup did not run' }
+          $installer = Get-ChildItem -Path 'dist' -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'no installer found in dist' }
+          & $env:SIGNTOOL_PATH sign /fd SHA256 /f $env:PFX_PATH /p $env:SIGN_PASSWORD /d "$env:APP_NAME Installer" "$($installer.FullName)"
+          echo "signed $($installer.Name)"
+
       - name: Build macOS app and DMG
         if: matrix.os == 'darwin'
         shell: bash
@@ -162,7 +207,24 @@ jobs:
           </plist>
           EOF
           codesign --force --deep --sign - "${APP}"
-          hdiutil create -volname "${APP_NAME} ${VERSION}" -srcfolder "${APP}" -ov -format UDZO "dist/${APP_NAME}-${VERSION}-darwin-${GOARCH}.dmg"
+
+          # Stage a directory holding both the app bundle and the /Applications
+          # symlink so the image is drag-to-install, then sign the signed app
+          # after anything else has been copied next to it.
+          STAGING="dist/dmg-${GOARCH}"
+          rm -rf "${STAGING}"
+          mkdir -p "${STAGING}"
+          mv "${APP}" "${STAGING}/${APP_NAME}.app"
+          ln -s /Applications "${STAGING}/Applications"
+          for REQUIRED in "${STAGING}/${APP_NAME}.app" "${STAGING}/Applications"; do
+            if [ ! -e "${REQUIRED}" ]; then
+              echo "::error::staging is missing ${REQUIRED}"
+              exit 1
+            fi
+          done
+          codesign --force --deep --sign - "${STAGING}/${APP_NAME}.app"
+
+          hdiutil create -volname "${APP_NAME} ${VERSION}" -srcfolder "${STAGING}" -ov -format UDZO "dist/${APP_NAME}-${VERSION}-darwin-${GOARCH}.dmg"
           codesign --force --sign - "dist/${APP_NAME}-${VERSION}-darwin-${GOARCH}.dmg"
 
       - name: Build Linux AppImage
